@@ -1,0 +1,35 @@
+SELECT RT.review_id, RT.business_id, RT.review_date, RT.review_stars, BT.business_is_open, BT.business_city, BT.business_avg_stars, BT.business_review_count, 
+       BT.business_hours_monday, BT.business_hours_tuesday, BT.business_hours_wendsday, BT.business_hours_thursday, BT.business_hours_friday,  
+       BT.business_hours_saturday, BT.business_hours_sunday, BT.business_categories, RT.text
+FROM (
+    SELECT business.j->>'business_id' AS business_id,
+           business.j->>'is_open' AS business_is_open,
+           business.j->>'city' AS business_city, 
+           business.j->>'stars' AS business_avg_stars,
+           business.j->>'review_count' AS business_review_count,
+           business.j->'hours'->>'Monday' AS business_hours_monday,
+           business.j->'hours'->>'Tuesday' AS business_hours_tuesday,
+           business.j->'hours'->>'Wendsday' AS business_hours_wendsday,
+           business.j->'hours'->>'Thursday' AS business_hours_thursday,
+           business.j->'hours'->>'Friday' AS business_hours_friday,
+           business.j->'hours'->>'Saturday' AS business_hours_saturday,
+           business.j->'hours'->>'Sunday' AS business_hours_sunday,
+           business.j->>'categories' AS business_categories
+    FROM business
+    WHERE business.j->>'city' IN (
+          'Ashland', 'Austin', 'Boise', 'Boston', 'Burlington', 'Charlotte', 'Chattanooga', 'Chicago', 'Clayton', 'Denver', 
+          'Gulfport', 'Houston', 'Indianapolis', 'Jefferson', 'Lincoln', 'Madison', 'Manchester', 'Meridian', 'Monroe', 
+          'Montgomery', 'Nashville', 'Philadelphia', 'Reno', 'Riverside', 'Salem', 'Spokane', 'Springfield', 'Tampa', 
+          'Trenton', 'Tucson', 'Waterloo', 'Williamsport', 'Wilmington', 'Worcester')
+    ORDER BY business_city 
+) AS BT
+INNER JOIN (
+    SELECT review.j->>'review_id' AS review_id,
+           review.j->>'business_id' AS business_id,
+           Cast(review.j->>'date' AS date) AS review_date,
+           review.j->>'stars' AS review_stars,
+	 	   review.j->>'text' AS review_text	
+    FROM review 
+	Where Cast(review.j->>'date' AS date) < '01.12.2019' AND Cast(review.j->>'date' AS date) > '01.12.2018' -- 1 Jahr vor erstem Covid case
+) AS RT 
+ON BT.business_id = RT.business_id
