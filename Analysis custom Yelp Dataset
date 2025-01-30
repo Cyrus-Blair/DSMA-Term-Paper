@@ -1,0 +1,1265 @@
+
+#####            Analysis custom Yelp Dataset           #####
+#####                                                   #####
+#####  RQ: What do customers value in a resteraunt?     #####
+#####   What are the drivers of positive reviews?       #####
+
+
+
+### Set up
+
+library(readxl)
+library(tidyr)
+library(tidyverse)
+library(tidytext)
+library(textdata)
+library(dplyr)
+library(ggplot2)
+library(mice)
+library(randomForest)
+library(ranger)
+library(MASS)
+library(stargazer)
+
+rm(list= ls())
+setwd("C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics")
+
+set.seed(123)
+
+
+
+
+##### Load data
+
+data <- read.csv("merged_data (Review with unstructured data) - 01.12.2017 bis 01.12.2019.csv")
+
+# Show missing n.a. 
+na_per_column <- colSums(is.na(data))
+print(na_per_column)
+
+
+
+
+#### Cleaning the data
+
+
+### Imputation
+
+# Perform the imputation
+imputed_data <- mice(data, method = "pmm", m = 5, seed = 123)
+
+# View the summary of the imputation process
+summary(imputed_data)
+
+# Extract the completed data (first imputed dataset)
+completed_data <- complete(imputed_data, 1)
+
+
+### Other data cleaning
+
+## Review Date
+data_clean <- completed_data
+
+data_clean$review_date <- as.Date(data_clean$review_date, format = "%Y-%m-%d")
+
+
+## Group and aggregate the business_categories (30010 -> 21 categories)
+
+# Step 1: Count the frequency of each category and extract the top 20
+category_counts <- data_clean %>%
+  separate_rows(business_categories, sep = ", ") %>%
+  count(business_categories, sort = TRUE)
+
+top_categories <- category_counts$business_categories[1:20]
+
+rm(category_counts)
+
+
+# Step 2: Create dummy variables for each top category without row duplication
+for (category in top_categories) {
+  data_clean[[category]] <- ifelse(
+    grepl(category, data_clean$business_categories), 1, 0
+  )
+}
+
+# Create the "Other" column
+data_clean <- data_clean %>%
+  mutate(Other = ifelse(
+    business_categories %>%
+      strsplit(", ") %>%
+      sapply(function(x) any(!x %in% top_categories)),
+    1, 0
+  ))
+
+
+## Getting Collumnnames of Business Categories
+dummy_columnnames_bus_categories_without_backtick <- c(tail(colnames(data_clean), n = 20))
+
+# Add backticks around the column names that might contain spaces or special characters
+dummy_columnnames_bus_categories <- paste0("`", dummy_columnnames_bus_categories_without_backtick, "`")
+
+# Identify the categories to remove due to multicollinearity
+categories_to_remove <- c("American (Traditional)", "American (New)")
+
+# Remove the unwanted categories from the dummy column names vector
+dummy_columnnames_bus_categories_clean <- setdiff(dummy_columnnames_bus_categories, categories_to_remove)
+
+data_clean$review_month <- format(as.Date(data_clean$review_date), "%m") # Extract month
+data_clean$review_month <- as.factor(data_clean$review_month) # Convert to factor
+
+
+##### Descriptive statistics
+summary(data_clean)
+str(data_clean)
+head(data_clean)
+
+
+
+
+##### Descriptive Ananlisis
+
+### Plots
+
+
+## Business city
+
+# Count the occurrences of each city
+city_counts <- data_clean %>%
+  group_by(business_city) %>%
+  summarise(count = n(), .groups = "drop")
+
+# Plot bar chart with ggplot2
+business_city_barplot <- ggplot(city_counts, aes(x = reorder(business_city, count), y = count)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black") +
+  labs(title = "Business City Frequency", x = "City", y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 8))  # Rotate and adjust text size
+
+business_city_barplot
+
+
+## Review Date
+review_date_histogram <- ggplot(data_clean, aes(x = review_date)) +
+  geom_histogram(bins = 30, fill = "skyblue", color = "black", alpha = 0.7) +
+  scale_x_date(date_labels = "%b %Y", date_breaks = "1 month") +
+  labs(title = "Histogram of Review Dates", x = "Review Date", y = "Number of Reviews") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))                      ############## Outliers at the ends - due to the date cutoff (no need for worry)
+
+review_date_histogram
+
+
+## Reviews per Business
+
+# Count the number of reviews included in this dataset for each business_id
+business_review_counts <- data_clean %>%
+  group_by(business_id) %>%
+  summarise(review_count = n(), .groups = 'drop')
+
+# Create a histogram to show the distribution of review counts across businesses
+business_ID_histogram <- ggplot(business_review_counts, aes(x = review_count)) +
+  geom_histogram(binwidth = 1, fill = "steelblue", color = "black") +
+  labs(
+    title = "Distribution of Reviews per Business",
+    x = "Number of Reviews per Business",
+    y = "Count of Businesses"
+  ) +
+  theme_minimal()
+
+business_ID_histogram
+
+
+## Review stars
+review_stars_histogram <- ggplot(data_clean, aes(x = review_stars)) +
+  geom_histogram(bins = 10, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Review Stars", x = "Review Stars", y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10))  # Adjust x-axis label size
+
+review_stars_histogram
+
+
+## Business is open
+business_is_open_barplot <- ggplot(data_clean, aes(x = factor(business_is_open))) +
+  geom_bar(fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Business Open Status", x = "Business is Open", y = "Frequency") +
+  scale_x_discrete(labels = c("Closed", "Open")) +  # Adjust labels for binary variable
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10))  # Adjust x-axis label size
+
+business_is_open_barplot
+
+
+## Business average stars
+business_avg_star_histogram <- ggplot(data_clean, aes(x = business_avg_stars)) +
+  geom_histogram(bins = 10, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Distribution of Business´average star rating", x = "Review Stars", y = "Frequency") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10))  # Adjust x-axis label size
+
+business_avg_star_histogram
+
+
+'## Business_category
+
+# Step 1: Select the dummy columns
+selected_data <- data_clean %>%
+  dplyr::select(dplyr::all_of(valid_dummy_columns))
+
+# Step 2: Summarize the columns
+summarized_data <- selected_data %>%
+  summarise(across(everything(), sum))
+
+# Step 3: Pivot the summarized data to long format
+category_counts <- summarized_data %>%
+  pivot_longer(cols = everything(), names_to = "Category", values_to = "Count")
+
+# Create a bar plot of category counts
+category_counts_plot <- ggplot(category_counts, aes(x = reorder(Category, -Count), y = Count)) +
+  geom_bar(stat = "identity", fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(title = "Observations per Business Category", x = "Business Category", y = "Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10)) +
+  coord_flip()
+
+category_counts_plot'
+
+
+
+
+## Tmax
+tmax_histogram <- ggplot(data_clean, aes(x = tmax)) +
+  geom_histogram(bins = 10, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of Maximum Daily Temperature",
+    x = "Temperature (°F)",  # Update the x-axis label
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10))  # Adjust x-axis label size
+
+tmax_histogram
+
+## Tmin
+tmin_histogram <- ggplot(data_clean, aes(x = tmin)) +
+  geom_histogram(bins = 10, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of Minimum Daily Temperature",
+    x = "Temperature (°F)",  # Update the x-axis label
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10))  # Adjust x-axis label size
+
+tmin_histogram
+
+## Prcp
+prcp_histogram <- ggplot(data_clean, aes(x = prcp)) +
+  geom_histogram(bins = 10, fill = "skyblue", color = "black", alpha = 0.7) +
+  labs(
+    title = "Distribution of daily precipitation amount",
+    x = "Precipitation (in)",  # Update the x-axis label
+    y = "Frequency"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size = 10))  # Adjust x-axis label size
+
+prcp_histogram
+
+
+### Weather statistics
+mean(data_clean$tmax)
+mean(data_clean$tmin)
+mean(data_clean$prcp)
+
+mean(data_clean$review_stars)
+
+
+## Remove unnessessary variables
+rm(business_review_counts, city_counts)
+
+
+
+
+#### Linear Regression
+
+
+## Regression 1
+
+# Specify the formula string
+formula1 <- as.formula(paste("review_stars ~ business_city + business_is_open + tmax + tmin + prcp +",
+                             paste(dummy_columnnames_bus_categories_clean, collapse = " + "),                     # Reference category / Ommitted category = Restaurant
+                             "+ review_month"))
+
+
+
+
+# Results
+summary_lin_reg_1 <- summary(lin_reg_1)
+summary_lin_reg_1$coefficients
+coefficients_df1 <- as.data.frame(summary(lin_reg_1)$coefficients)
+
+
+## Regression 2
+
+# Specify the formula string
+formula2 <- as.formula(paste("review_stars ~ business_city + business_is_open + tmax + tmin + prcp +",
+                             paste(dummy_columnnames_bus_categories_clean, collapse = " + "), "+",
+                             paste(paste(dummy_columnnames_bus_categories_clean, "tmax", sep = "*"), collapse = " + "), "+",
+                             paste(paste(dummy_columnnames_bus_categories_clean, "tmin", sep = "*"), collapse = " + "), "+",
+                             paste(paste(dummy_columnnames_bus_categories_clean, "prcp", sep = "*"), collapse = " + "), "+ review_month"))
+formula2
+
+# Fit the model
+lin_reg_2 <- lm(formula2, data = data_clean)
+
+# Results
+summary_lin_reg_2 <- summary(lin_reg_2)
+summary_lin_reg_2$coefficients
+coefficients_df2 <- as.data.frame(summary(lin_reg_2)$coefficients)
+
+
+
+## Regression 3
+
+# Specify the formula string
+formula3 <- as.formula(paste("review_stars ~ business_city + business_is_open + tmax + tmin + prcp + business_avg_stars + business_review_count +",
+                             paste(dummy_columnnames_bus_categories_clean, collapse = " + "), "+",
+                             paste(paste(dummy_columnnames_bus_categories_clean, "tmax", sep = "*"), collapse = " + "), "+",
+                             paste(paste(dummy_columnnames_bus_categories_clean, "tmin", sep = "*"), collapse = " + "), "+",
+                             paste(paste(dummy_columnnames_bus_categories_clean, "prcp", sep = "*"), collapse = " + "), "+ review_month"))
+formula3
+
+# Fit the model
+lin_reg_3 <- lm(formula3, data = data_clean)
+
+# Results
+summary_lin_reg_3 <- summary(lin_reg_3)
+summary_lin_reg_3$coefficients
+coefficients_df3 <- as.data.frame(summary(lin_reg_3)$coefficients)
+
+
+
+## Display results with stargazer
+stargazer(lin_reg_1, lin_reg_2, lin_reg_3, type = "html",
+          omit = c("business_city", "review_month"),  
+          omit.labels = c("City Fixed Effects Included", "Month Fixed Effects Included"),
+          dep.var.labels = "Review Stars",
+          column.labels = c("Model 1", "Model 2", "Model 3"),
+          covariate.labels = c("Business is Open", 
+                               "Max Temperature (Tmax)", "Min Temperature (Tmin)", "Precipitation (Prcp)", 
+                               ifelse("business_avg_stars" %in% names(coef(lin_reg_2)), "Business Avg Stars", ""),
+                               ifelse("business_review_count" %in% names(coef(lin_reg_2)), "Business Review Count", ""),
+                               dummy_columnnames_bus_categories_clean, 
+                               paste(dummy_columnnames_bus_categories_clean, "* Tmax"),
+                               paste(dummy_columnnames_bus_categories_clean, "* Tmin"),
+                               paste(dummy_columnnames_bus_categories_clean, "* Prcp")),
+          omit.stat = c("f", "ser"),
+          title = "Linear Regression Results: Review Stars",
+          notes = "Standard errors in parentheses. City and Month fixed effects are included but not shown.",
+          out = "regression_results.html")
+
+
+
+
+
+
+##### Predictive Analysis
+
+
+### Splitting data into Trainig Data and Testing Data
+
+set.seed(123)  # For reproducibility
+
+# Calculate the indices for the training set (80% of the rows)
+train_indices <- sample(seq_len(nrow(data_clean)), size = 0.8 * nrow(data_clean))
+
+# Create the training data
+train_data <- data_clean[train_indices, ]
+
+# Create the testing data using the remaining rows
+test_data <- data_clean[-train_indices, ]
+
+
+
+
+str(train_data)
+str(test_data)
+
+
+
+#### Ordinal Logistic Regression
+
+# Create data set for Ordinal Logistic Regression
+train_data_ordinal <- train_data
+test_data_ordinal <- test_data
+
+train_data_ordinal$business_city <- as.factor(train_data$business_city)
+test_data_ordinal$business_city <- as.factor(test_data$business_city)
+
+# Ensure business_city in test_data_ordinal has the same levels as in train_data_ordinal
+test_data_ordinal$business_city <- factor(test_data_ordinal$business_city, 
+                                          levels = levels(train_data_ordinal$business_city))
+
+
+# Remove rows with NA (only1) in business_city (caused by unseen levels)
+test_data_ordinal <- na.omit(test_data_ordinal)
+
+
+# Convert review_stars to a Factor
+train_data_ordinal$review_stars <- factor(train_data_ordinal$review_stars, levels = c(1, 2, 3, 4, 5), ordered = TRUE)
+test_data_ordinal$review_stars <- factor(test_data_ordinal$review_stars, levels = c(1, 2, 3, 4, 5), ordered = TRUE)
+
+
+str(train_data_ordinal)
+str(test_data_ordinal)
+
+summary(train_data_ordinal$business_city)
+summary(test_data_ordinal$business_city)
+
+
+
+
+
+## Regression 1
+
+# Fit the model
+ordinal_reg_1 <- polr(formula1, data = train_data_ordinal, Hess = TRUE)
+ 
+
+# Results
+summary_ordinal_reg_1 <- summary(ordinal_reg_1)
+summary_ordinal_reg_1$coefficients
+coefficients_df1 <- as.data.frame(summary(ordinal_reg_1)$coefficients)
+
+
+## Regression 2
+
+# Fit the model
+ordinal_reg_2 <- polr(formula2, data = train_data_ordinal, Hess = TRUE)
+
+
+# Results
+summary_ordinal_reg_2 <- summary(ordinal_reg_2)
+summary_ordinal_reg_2$coefficients
+coefficients_df2 <- as.data.frame(summary(ordinal_reg_2)$coefficients)
+
+
+
+## Regression 3
+
+# Specify the formula string
+
+# Fit the model
+ordinal_reg_3 <- polr(formula3, data = train_data_ordinal, Hess = TRUE)
+
+
+# Results
+summary_ordinal_reg_3 <- summary(ordinal_reg_3)
+summary_ordinal_reg_3$coefficients
+coefficients_df3 <- as.data.frame(summary(ordinal_reg_3)$coefficients)
+
+
+## Display results with stargazer
+stargazer(ordinal_reg_1, ordinal_reg_2, ordinal_reg_3, type = "html",
+          omit = c("business_city", "review_month"),  
+          omit.labels = c("City Fixed Effects Included", "Month Fixed Effects Included"),
+          dep.var.labels = "Review Stars",
+          column.labels = c("Model 1", "Model 2", "Model 3"),
+          covariate.labels = c("Business is Open", 
+                               "Max Temperature (Tmax)", "Min Temperature (Tmin)", "Precipitation (Prcp)", 
+                               ifelse("business_avg_stars" %in% names(coef(ordinal_reg_2)), "Business Avg Stars", ""),
+                               ifelse("business_review_count" %in% names(coef(ordinal_reg_2)), "Business Review Count", ""),
+                               dummy_columnnames_bus_categories_clean, 
+                               paste(dummy_columnnames_bus_categories_clean, "* Tmax"),
+                               paste(dummy_columnnames_bus_categories_clean, "* Tmin"),
+                               paste(dummy_columnnames_bus_categories_clean, "* Prcp")),
+          omit.stat = c("f", "ser"),
+          title = "Ordinal Regression Results: Review Stars",
+          notes = "Standard errors in parentheses. City and Month fixed effects are included but not shown.",
+          out = "regression_results.html")
+
+
+# ### Evaluate the models
+# 
+# # Get predicted probabilities for the test data
+# pred_probs_test1 <- predict(ordinal_reg_1, newdata = test_data_ordinal, type = "probs")
+# pred_probs_test2 <- predict(ordinal_reg_2, newdata = test_data_ordinal, type = "probs")
+# pred_probs_test3 <- predict(ordinal_reg_3, newdata = test_data_ordinal, type = "probs")
+# 
+# # Function to calculate Gini Index
+# gini <- function(actual, predicted) {
+#   # Sort the actual and predicted together based on predicted
+#   data <- data.frame(actual, predicted)
+#   data <- data[order(data$predicted, decreasing = TRUE),]
+#   
+#   # Cumulative proportions of predicted values
+#   data$cum_actual <- cumsum(data$actual) / sum(data$actual)
+#   data$cum_predicted <- cumsum(data$predicted) / sum(data$predicted)
+#   
+#   # Calculate the area under the curve and the Gini index
+#   gini_index <- 1 - 2 * sum((data$cum_predicted - lag(data$cum_predicted, default = 0)) * (data$cum_actual + lag(data$cum_actual, default = 0)))/nrow(data)
+#   return(gini_index)
+# }
+# 
+# # Actual observed values from the test data (response variable)
+# actual_test <- test_data_ordinal$review_stars 
+# 
+# # Predicted values (weighted average of predicted probabilities)
+# # For each observation, calculate the weighted sum of probabilities for each class (ordinal category)
+# predicted_test1 <- apply(pred_probs_test1, 1, function(x) sum(x * (1:5)))
+# predicted_test2 <- apply(pred_probs_test2, 1, function(x) sum(x * (1:5)))
+# predicted_test3 <- apply(pred_probs_test3, 1, function(x) sum(x * (1:5)))
+# 
+# 
+# # Compute the Gini index for the model on the test data
+# gini_score_test1 <- gini(actual_test, predicted_test1)
+# gini_score_test1
+# gini_score_test2 <- gini(actual_test, predicted_test2)
+# gini_score_test2
+# gini_score_test3 <- gini(actual_test, predicted_test3)
+# gini_score_test3
+
+
+
+
+#### Random Forest
+
+
+### Whithout Interactions
+
+# create dataset for random forest
+data_rf <- train_data
+
+# Check and adjust column names to wrap special characters
+adjusted_colnames <- make.names(colnames(data_rf), unique = TRUE)
+
+# Assign adjusted column names back to the dataset
+colnames(data_rf) <- adjusted_colnames
+
+# Reconstruct the formula using adjusted column names
+exclude_columns <- c("review_stars", 
+                     "review_id",
+                     "review_text",
+                     "business_categories",
+                     "business_hours_monday", "business_hours_tuesday", 
+                     "business_hours_wendsday", "business_hours_thursday", 
+                     "business_hours_friday", "business_hours_saturday", 
+                     "business_hours_sunday")
+
+independent_vars <- setdiff(adjusted_colnames, exclude_columns)
+formula_rf <- as.formula(paste("review_stars ~", paste(independent_vars, collapse = " + ")))
+
+
+# Convert review_stars to a factor for classification
+data_rf$review_stars <- as.factor(data_rf$review_stars)
+
+# Columns to exclude
+exclude_columns <- c("review_stars", 
+                     "business_categories",
+                     "business_hours_monday", "business_hours_tuesday", 
+                     "business_hours_wendsday", "business_hours_thursday", 
+                     "business_hours_friday", "business_hours_saturday", 
+                     "business_hours_sunday")
+
+# Define independent variables by excluding specified columns
+independent_vars <- setdiff(colnames(data_rf), exclude_columns)
+
+# Wrap independent variable names in backticks
+independent_vars <- paste0("`", independent_vars, "`")
+
+# Create the formula for the random forest model
+target_var <- "review_stars"
+formula_rf <- as.formula(paste(target_var, "~", paste(independent_vars, collapse = " + ")))
+
+
+# Fit the random forest classification model using ranger
+set.seed(123)  # For reproducibility
+
+rf_model <- ranger(
+  formula = formula_rf, 
+  data = data_rf, 
+  num.trees = 500, 
+  importance = "impurity", 
+  classification = TRUE, 
+  verbose = TRUE,
+  num.threads = parallel::detectCores() - 1  # Use all but one core
+)
+
+# View the model summary
+print(rf_model)
+
+## Variable importance
+
+# Extract variable importance
+var_imp <- as.data.frame(rf_model$variable.importance)
+colnames(var_imp) <- c("Importance")
+var_imp$Variable <- rownames(var_imp)
+var_imp <- var_imp[order(-var_imp$Importance), ]  # Sort by importance
+print(var_imp)
+
+# Plot Variable Importance
+library(ggplot2)
+variable_importance_barplot <- ggplot(var_imp, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  labs(title = "Variable Importance", x = "Variable", y = "Importance") +
+  theme_minimal()
+
+variable_importance_barplot
+
+
+
+# ## Evaluate Model Performance with test_data
+# 
+# # Predict the dependent variable for test_data
+# predictions <- predict(rf_model, data = test_data, type = "response")
+# 
+# # Extract predicted classes
+# predicted_classes <- predictions$predictions
+# 
+# # True labels from the test_data
+# true_labels <- test_data$review_stars
+# 
+# 
+# ## Create confusion matrix
+# confusion_matrix <- table(Predicted = predicted_classes, Actual = true_labels)
+# print("Confusion Matrix:")
+# print(confusion_matrix)
+# 
+# ## Calculate accuracy
+# accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+# cat("Accuracy:", accuracy, "\n")
+
+
+
+
+
+
+### With Interactions
+
+# create dataset for random forest
+data_rf_I <- train_data
+
+
+## Generate Interaction collumns
+
+# Define the weather variables and business categories
+weather_vars <- c("tmax", "tmin", "prcp")
+business_categories <- gsub("`", "", dummy_columnnames_bus_categories_clean)  # assuming you already have this list
+
+# Loop through the business categories and weather variables to create interaction terms
+for (category in business_categories) {
+  for (weather_var in weather_vars) {
+    # Create the interaction column
+    interaction_column <- paste(weather_var, category, sep = "_")
+    data_rf_I[[interaction_column]] <- data_rf_I[[weather_var]] * data_rf_I[[category]]
+  }
+}
+
+
+# Check and adjust column names to wrap special characters
+adjusted_colnames <- make.names(colnames(data_rf_I), unique = TRUE)
+
+# Assign adjusted column names back to the dataset
+colnames(data_rf_I) <- adjusted_colnames
+
+# Reconstruct the formula using adjusted column names
+exclude_columns <- c("review_stars", 
+                     "review_id",
+                     "review_text",
+                     "business_categories",
+                     "business_hours_monday", "business_hours_tuesday", 
+                     "business_hours_wendsday", "business_hours_thursday", 
+                     "business_hours_friday", "business_hours_saturday", 
+                     "business_hours_sunday")
+
+independent_vars <- setdiff(adjusted_colnames, exclude_columns)
+formula_rf <- as.formula(paste("review_stars ~", paste(independent_vars, collapse = " + ")))
+
+
+# Convert review_stars to a factor for classification
+data_rf$review_stars <- as.factor(data_rf_I$review_stars)
+
+# Columns to exclude
+exclude_columns <- c("review_stars", 
+                     "business_categories",
+                     "business_hours_monday", "business_hours_tuesday", 
+                     "business_hours_wendsday", "business_hours_thursday", 
+                     "business_hours_friday", "business_hours_saturday", 
+                     "business_hours_sunday")
+
+# Define independent variables by excluding specified columns
+independent_vars <- setdiff(colnames(data_rf_I), exclude_columns)
+
+# Wrap independent variable names in backticks
+independent_vars <- paste0("`", independent_vars, "`")
+
+# Create the formula for the random forest model
+target_var <- "review_stars"
+formula_rf_with_Interactions <- as.formula(paste(target_var, "~", paste(independent_vars, collapse = " + ")))
+
+
+# Fit the random forest classification model
+set.seed(123)  # For reproducibility
+
+rf_model_with_Interactions <- ranger(
+  formula = formula_rf_with_Interactions, 
+  data = data_rf_I, 
+  num.trees = 500, 
+  importance = "impurity", 
+  classification = TRUE, 
+  verbose = TRUE,
+  num.threads = parallel::detectCores() - 1  # Use all but one core
+)
+
+# View the model summary
+print(rf_model_with_Interactions)
+
+
+## Variable importance
+
+# Extract variable importance
+var_imp_with_Interactions <- as.data.frame(rf_model_with_Interactions$variable.importance)
+colnames(var_imp_with_Interactions) <- c("Importance")
+var_imp_with_Interactions$Variable <- rownames(var_imp_with_Interactions)
+var_imp_with_Interactions <- var_imp_with_Interactions[order(-var_imp_with_Interactions$Importance), ]  # Sort by importance
+print(var_imp_with_Interactions)
+
+# Plot Variable Importance
+library(ggplot2)
+variable_importance_barplot_with_Interactions <- ggplot(var_imp_with_Interactions, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  labs(title = "Variable Importance with Interactions", x = "Variable", y = "Importance") +
+  theme_minimal()
+
+variable_importance_barplot_with_Interactions
+
+
+# Limit to top 33 most important variables
+top_33_var_imp_with_Interactions <- var_imp_with_Interactions[1:33, ]
+
+# Plot Variable Importance for the top 33 variables
+library(ggplot2)
+variable_importance_barplot_with_Interactions <- ggplot(top_33_var_imp_with_Interactions, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +
+  labs(title = "Top 33 Variable Importance with Interactions", x = "Variable", y = "Importance") +
+  theme_minimal()
+
+# Show the plot
+variable_importance_barplot_with_Interactions
+
+
+
+# ## Evaluate Model Performance with test_data
+# 
+# # Transform Data
+# for (category in business_categories) {
+#   for (weather_var in weather_vars) {
+#     # Create the interaction columns for the test data
+#     interaction_column <- paste(weather_var, category, sep = "_")
+#     test_data[[interaction_column]] <- test_data[[weather_var]] * test_data[[category]]
+#   }
+# }
+# 
+# # Check and adjust column names to match the training data
+# adjusted_test_colnames <- make.names(colnames(test_data), unique = TRUE)
+# colnames(test_data) <- adjusted_test_colnames
+# 
+# # Ensure the test data has the same independent variables as the training data
+# test_data <- test_data[, colnames(test_data) %in% colnames(data_rf_I)]
+# 
+# 
+# 
+# ## Predict the dependent variable for test_data
+# predictions <- predict(rf_model_with_Interactions, data = test_data, type = "response")
+# 
+# # Extract predicted classes
+# predicted_classes <- predictions$predictions
+# 
+# # True labels from the test_data
+# true_labels <- test_data$review_stars
+# 
+# 
+# ## Create confusion matrix
+# confusion_matrix_with_Interactions <- table(Predicted = predicted_classes, Actual = true_labels)
+# print("Confusion Matrix:")
+# print(confusion_matrix_with_Interactions)
+# 
+# ## Calculate accuracy
+# accuracy_with_Interactions <- sum(diag(confusion_matrix_with_Interactions)) / sum(confusion_matrix_with_Interactions)
+# cat("Accuracy:", accuracy_with_Interactions, "\n")
+# 
+# 
+# ## Variable Importance
+# print(var_imp)
+# 
+# # Total number of instances
+# total_instances <- sum(conf_matrix)
+# 
+# # Total number of actual positives for each class
+# total_positives <- colSums(conf_matrix)
+# 
+# # Function to calculate Lift for each class
+# calculate_lift <- function(conf_matrix_model, conf_matrix_random) {
+#   lift_values <- c()
+#   for (i in 1:nrow(conf_matrix_model)) {
+#     TP_model <- conf_matrix_model[i, i]
+#     TP_random <- sum(conf_matrix_random[i, ]) / total_instances * total_positives[i]
+#     
+#     TPR_model <- TP_model / total_positives[i]
+#     TPR_random <- TP_random / total_positives[i]
+#     
+#     lift_values <- c(lift_values, TPR_model / TPR_random)
+#   }
+#   return(lift_values)
+# }
+# 
+# # Calculate the lift for both matrices
+# lift_with_interactions <- calculate_lift(conf_matrix_with_Interactions, conf_matrix)
+# lift_without_interactions <- calculate_lift(conf_matrix, conf_matrix)
+# 
+# # Create a comparison plot
+# library(ggplot2)
+# class_labels <- factor(1:5, labels = c("Class 1", "Class 2", "Class 3", "Class 4", "Class 5"))
+# 
+# lift_df <- data.frame(
+#   Class = rep(class_labels, 2),
+#   Lift = c(lift_with_interactions, lift_without_interactions),
+#   Model = rep(c("With Interactions", "Without Interactions"), each = 5)
+# )
+# 
+# ggplot(lift_df, aes(x = Class, y = Lift, fill = Model)) +
+#   geom_bar(stat = "identity", position = "dodge") +
+#   labs(title = "Lift Comparison Between Models", y = "Lift", x = "Class") +
+#   theme_minimal()
+
+
+
+
+
+#### Sentiment Analysis
+
+### Data Preperation
+data_sentiment_analysis <- train_data
+
+data_sentiment_analysis$tmax_high <- ifelse(data_sentiment_analysis$tmax > mean(data_sentiment_analysis$tmax), 1, 0)
+data_sentiment_analysis$tmax_low <- ifelse(data_sentiment_analysis$tmax <= mean(data_sentiment_analysis$tmax), 1, 0)
+
+data_sentiment_analysis$tmin_high <- ifelse(data_sentiment_analysis$tmin > mean(data_sentiment_analysis$tmin), 1, 0)
+data_sentiment_analysis$tmin_low <- ifelse(data_sentiment_analysis$tmin <= mean(data_sentiment_analysis$tmin), 1, 0)
+
+data_sentiment_analysis$prcp_high <- ifelse(data_sentiment_analysis$prcp > mean(data_sentiment_analysis$prcp), 1, 0)
+data_sentiment_analysis$prcp_low <- ifelse(data_sentiment_analysis$prcp <= mean(data_sentiment_analysis$prcp), 1, 0)
+
+
+summary(train_data)
+summary(data_sentiment_analysis)
+mean(data_sentiment_analysis$tmax)
+
+
+# Load sentiment lexicon
+# Using the Bing lexicon here; you can also try `get_sentiments("afinn")` or `nrc`
+bing_sentiments <- get_sentiments("bing")
+
+# Tokenize the review_text column and retain word-level information
+sentiment_data <- data_sentiment_analysis %>%
+  unnest_tokens(word, review_text) %>%                 # Tokenize the text
+  anti_join(stop_words, by = "word") %>%               # Remove stop words
+  inner_join(bing_sentiments, by = "word") %>%         # Join with sentiment lexicon
+  count(review_stars, business_city, tmax_high, tmax_low, tmin_high, tmin_low, prcp_high, prcp_low, `Restaurants`, `Food`, `Nightlife`, `Bars`, `American (Traditional)`, `American (New)`, `Breakfast & Brunch`, `Sandwiches`, `Event Planning & Services`, `Shopping`, `Coffee & Tea`, `Burgers`, `Mexican`, `Seafood`, `Pizza`, `Beauty & Spas`, `Cocktail Bars`, `Arts & Entertainment`, `Italian`, `Salad`, `Other`,
+        word, sentiment, sort = TRUE)                  # Count words by sentiment
+
+
+
+
+### Top Positive and Negative words
+
+# Check for most common words for each sentiment
+common_words <- sentiment_data %>%
+  group_by(word, sentiment) %>%
+  summarise(
+    total_score = sum(n, na.rm = TRUE),                # Sum up word counts
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_score))
+
+# View top common words
+top_common_words <- print(head(common_words, 30), n = 30)
+top_common_words
+
+
+
+### Top Positive and Negative words by Business Category
+
+business_categories <- append(dummy_columnnames_bus_categories_clean, c("Restaurants", "business_city"))
+business_categories <- gsub("`", "", business_categories)
+
+
+# Initialize an empty list to store the results
+all_top_words_business <- list()
+
+# Loop through each business category
+for (category in business_categories) {
+  # Filter the data for the specified category where the dummy variable equals 1
+  category_specific_words <- sentiment_data %>%
+    filter(get(category) == 1) %>%               # Adjust to the relevant dummy variable
+    group_by(word, sentiment) %>%                # Group by word and sentiment
+    summarise(
+      total_score = sum(n, na.rm = TRUE),        # Sum up word counts
+      .groups = "drop"
+    ) %>%
+    arrange(sentiment, desc(total_score))        # Sort by sentiment and descending score
+  
+  # Get top 10 positive and negative words
+  top_positive_words <- category_specific_words %>%
+    filter(sentiment == "positive") %>%
+    slice_max(total_score, n = 10)               # Top 10 positive words
+  
+  top_negative_words <- category_specific_words %>%
+    filter(sentiment == "negative") %>%
+    slice_max(total_score, n = 10)               # Top 10 negative words
+  
+  # Combine results for better visualization
+  top_words <- bind_rows(
+    top_positive_words %>% mutate(type = "Positive", category = category),
+    top_negative_words %>% mutate(type = "Negative", category = category)
+  )
+  
+  # Append to the overall list
+  all_top_words_business[[category]] <- top_words
+  
+  # Dynamically create a new variable to store the results
+  object_name <- paste0("top_words_", category)  # Create a descriptive name
+  assign(object_name, top_words)                # Store the dataframe in the environment
+  
+  # View progress in the console
+  cat("Results stored in:", object_name, "\n")
+}
+
+
+# Combine all categories into a single data frame
+all_top_words_df_business_categories <- bind_rows(all_top_words_business)
+
+# Plot the results using ggplot2
+plot_absolute_business_category <- ggplot(all_top_words_df_business_categories, aes(x = reorder(word, total_score), y = total_score, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ category, scales = "free_y") +   # Facet by category
+  coord_flip() +                               # Flip coordinates to make it horizontal
+  labs(x = "Words", y = "Total Sentiment Score", title = "Top Positive and Negative Words by Business Category") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Rotate x-axis labels for better readability
+
+
+
+# Calculate relative scores for each word (proportions)
+all_top_words_relative_df <- all_top_words_df_business_categories %>%
+  group_by(category, sentiment) %>%
+  mutate(relative_score = total_score / sum(total_score)) %>%  # Calculate relative score
+  ungroup()
+
+# Plot 2: Relative Sentiment Score (Proportions)
+plot_relative_business_category <- ggplot(all_top_words_relative_df, aes(x = reorder(word, relative_score), y = relative_score, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ category, scales = "free_y") +   # Facet by category
+  coord_flip() +                               # Flip coordinates to make it horizontal
+  labs(x = "Words", y = "Relative Sentiment Score", title = "Top Positive and Negative Words by Business Category (Relative)") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Rotate x-axis labels for better readability
+
+# Print both plots
+print(plot_absolute_business_category)
+print(plot_relative_business_category)
+
+
+
+
+
+### Top Positive and Negative words by Weather Category
+
+weather_categories <- c("tmax_high", "tmax_low", "tmin_high", "tmin_low", "prcp_high", "prcp_low")
+
+# Initialize an empty list to store the results
+all_top_words <- list()
+
+# Loop through each weather category
+for (category in weather_categories) {
+  # Filter the data for the specified category where the dummy variable equals 1
+  category_specific_words <- sentiment_data %>%
+    filter(get(category) == 1) %>%               # Adjust to the relevant dummy variable
+    group_by(word, sentiment) %>%                # Group by word and sentiment
+    summarise(
+      total_score = sum(n, na.rm = TRUE),        # Sum up word counts
+      .groups = "drop"
+    ) %>%
+    arrange(sentiment, desc(total_score))        # Sort by sentiment and descending score
+  
+  # Get top 10 positive and negative words
+  top_positive_words <- category_specific_words %>%
+    filter(sentiment == "positive") %>%
+    slice_max(total_score, n = 10)               # Top 10 positive words
+  
+  top_negative_words <- category_specific_words %>%
+    filter(sentiment == "negative") %>%
+    slice_max(total_score, n = 10)               # Top 10 negative words
+  
+  # Combine results for better visualization
+  top_words <- bind_rows(
+    top_positive_words %>% mutate(type = "Positive", category = category),
+    top_negative_words %>% mutate(type = "Negative", category = category)
+  )
+  
+  # Append to the overall list
+  all_top_words[[category]] <- top_words
+  
+  # Dynamically create a new variable to store the results
+  object_name <- paste0("top_words_", category)  # Create a descriptive name
+  assign(object_name, top_words)                # Store the dataframe in the environment
+  
+  # View progress in the console
+  cat("Results stored in:", object_name, "\n")
+}
+
+
+# Combine all categories into a single data frame
+all_top_words_df_weather_categories <- bind_rows(all_top_words)
+
+# Plot the results using ggplot2
+plot_absolute_weather_category <- ggplot(all_top_words_df_weather_categories, aes(x = reorder(word, total_score), y = total_score, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ category, scales = "free_y") +   # Facet by category
+  coord_flip() +                               # Flip coordinates to make it horizontal
+  labs(x = "Words", y = "Total Sentiment Score", title = "Top Positive and Negative Words by Weather Category") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Rotate x-axis labels for better readability
+
+
+
+# Calculate relative scores for each word (proportions)
+all_top_words_relative_df <- all_top_words_df_weather_categories %>%
+  group_by(category, sentiment) %>%
+  mutate(relative_score = total_score / sum(total_score)) %>%  # Calculate relative score
+  ungroup()
+
+# Plot 2: Relative Sentiment Score (Proportions)
+plot_relative_weather_category <- ggplot(all_top_words_relative_df, aes(x = reorder(word, relative_score), y = relative_score, fill = type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~ category, scales = "free_y") +   # Facet by category
+  coord_flip() +                               # Flip coordinates to make it horizontal
+  labs(x = "Words", y = "Relative Sentiment Score", title = "Top Positive and Negative Words by Weather Category (Relative)") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) # Rotate x-axis labels for better readability
+
+# Print both plots
+print(plot_absolute_weather_category)
+print(plot_relative_weather_category)
+
+
+
+
+
+# ### Differences in Top Positive and Negative words one category (Resteraunts) vs. Others
+# 
+# # Filter rows where the business is categorized as "Restaurants"
+# target_reviews <- sentiment_data %>%
+#   filter(Restaurants == 1)
+# 
+# # Filter rows for all other categories (not Restaurants)
+# other_reviews <- sentiment_data %>%
+#   filter(Restaurants == 0)
+# 
+# # Step 1: Calculate total word counts for each category
+# total_target_words <- sum(target_reviews$n)
+# total_other_words <- sum(other_reviews$n)
+# 
+# # Step 2: Normalize the word counts and convert to percentage
+# target_words <- target_reviews %>%
+#   count(word, sort = TRUE) %>%
+#   mutate(relative_freq_target = round((n / total_target_words) * 100, 4))
+# 
+# other_words <- other_reviews %>%
+#   count(word, sort = TRUE) %>%
+#   mutate(relative_freq_other = round((n / total_other_words) * 100, 4))
+# 
+# # Step 3: Join and calculate differences in relative frequencies
+# relative_comparison <- target_words %>%
+#   full_join(other_words, by = "word") %>%
+#   mutate(
+#     relative_freq_target = replace_na(relative_freq_target, 0),
+#     relative_freq_other = replace_na(relative_freq_other, 0),
+#     relative_diff = round(relative_freq_target - relative_freq_other, 4)
+#   ) %>%
+#   select(word, relative_freq_target, relative_freq_other, relative_diff) %>% # Exclude n.x and n.y
+#   arrange(desc(abs(relative_diff)))  # Sort by absolute difference
+# 
+# # Step 4: Display the top 20 words with the largest relative frequency differences
+# head(relative_comparison, 20)
+
+
+# 
+# 
+# ### Biggest Differences over all categorys
+# 
+# # Initialize a list to store results for each category
+# results_list <- list()
+# 
+# # Loop through each category in business_categories
+# for (category in business_categories) {
+#   # Filter rows where the business is categorized as the current category
+#   target_reviews <- sentiment_data %>%
+#     filter(!!sym(category) == 1)
+#   
+#   # Filter rows for all other categories
+#   other_reviews <- sentiment_data %>%
+#     filter(!!sym(category) == 0)
+#   
+#   # Calculate total word counts for each subset
+#   total_target_words <- sum(target_reviews$n)
+#   total_other_words <- sum(other_reviews$n)
+#   
+#   # Normalize the word counts and convert to percentage
+#   target_words <- target_reviews %>%
+#     count(word, sort = TRUE) %>%
+#     mutate(relative_freq_target = round((n / total_target_words) * 100, 4))
+#   
+#   other_words <- other_reviews %>%
+#     count(word, sort = TRUE) %>%
+#     mutate(relative_freq_other = round((n / total_other_words) * 100, 4))
+#   
+#   # Join and calculate differences in relative frequencies
+#   relative_comparison <- target_words %>%
+#     full_join(other_words, by = "word") %>%
+#     mutate(
+#       relative_freq_target = replace_na(relative_freq_target, 0),
+#       relative_freq_other = replace_na(relative_freq_other, 0),
+#       relative_diff = round(relative_freq_target - relative_freq_other, 4),
+#       category = category  # Add category for identification
+#     ) %>%
+#     select(word, category, relative_freq_target, relative_freq_other, relative_diff) %>%
+#     arrange(desc(abs(relative_diff)))
+#   
+#   # Store the top differences for this category in the results list
+#   results_list[[category]] <- head(relative_comparison, 20)
+# }
+# 
+# # Combine all results into a single data frame
+# all_results <- bind_rows(results_list)
+# 
+# # Find the words with the biggest absolute differences across all categories
+# top_differences <- all_results %>%
+#   arrange(desc(abs(relative_diff))) %>%
+#   head(50)
+# 
+# # Display the top differences
+# print(top_differences)
+
+
+
+
+
+
+#### Save Environment
+
+# save(train_data, test_data, file = "split_datasets.RData")
+
+# save(data, completed_data, file = "large_datasets.RData")
+
+
+# Specify the variables you want to keep, including plots and models
+
+# keep_vars <- c(
+#   # Descriptive Plots
+#   "business_city_barplot",
+#   "review_date_histogram",
+#   "business_ID_histogram",
+#   "review_stars_histogram",
+#   "business_is_open_barplot",
+#   "business_avg_star_histogram",
+#   "category_counts_plot",
+# 
+#   # Random Forest
+#   "rf_model",
+#   "var_imp",
+#   "variable_importance_barplot",
+#   "conf_matrix",
+#   "accuracy",
+# 
+#   # Random Forest with Interactions
+#   "rf_model_with_Interactions",
+#   "var_imp_with_Interactions",
+#   "variable_importance_barplot_with_Interactions",
+#   "conf_matrix_with_Interactions",
+#   "accuracy_with_Interactions")
+
+# keep_vars <- c(
+#   # Ordinal Regression
+#   "summary_ordinal_reg_1",
+#   "coefficients_df1",
+#   "summary_ordinal_reg_2",
+#   "coefficients_df2",
+#   "summary_ordinal_reg_3",
+#   "coefficients_df3")
+
+# keep_vars <- c(
+#   "common_words",
+#   "top_common_words",
+#   
+#   "all_top_words_df_business_categories",
+#   "all_top_words_df_weather_categories",
+#   
+#   # Business category variables
+#   "top_words_Food", "top_words_Nightlife", "top_words_Bars", 
+#   "top_words_American (Traditional)", "top_words_American (New)", 
+#   "top_words_Breakfast & Brunch", "top_words_Sandwiches", 
+#   "top_words_Event Planning & Services", "top_words_Shopping", 
+#   "top_words_Coffee & Tea", "top_words_Mexican", "top_words_Burgers", 
+#   "top_words_Seafood", "top_words_Pizza", "top_words_Cocktail Bars", 
+#   "top_words_Beauty & Spas", "top_words_Arts & Entertainment", 
+#   "top_words_Italian", "top_words_Salad", "top_words_Other", 
+#   "top_words_Restaurants", "top_words_business_city",
+#   
+#   # Weather category variables
+#   "top_words_tmax_high", "top_words_tmax_low", "top_words_tmin_high", 
+#   "top_words_tmin_low", "top_words_prcp_high", "top_words_prcp_low",
+#   
+#   # Plot variables
+#   "plot_absolute_business_category", "plot_relative_business_category", 
+#   "plot_absolute_weather_category", "plot_relative_weather_category",
+#   
+#   # Differences in Top Positive and Negative words one category (Resteraunts) vs. Others
+#   "relative_comparison",
+#   
+#   # Biggest Differences over all categorys
+#   "top_differences"
+# )
+
+# 
+# setwd("C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics/RData temporary")
+# 
+# # Create separate lists for plot variables and non-plot variables
+# plot_vars <- keep_vars[sapply(keep_vars, function(x) inherits(get(x), "gg"))]  # Identify ggplot objects
+# non_plot_vars <- setdiff(keep_vars, plot_vars)  # Everything else
+# 
+# # Check if all non-plot variables exist
+# missing_vars <- non_plot_vars[!non_plot_vars %in% ls()]
+# 
+# if (length(missing_vars) > 0) {
+#   cat("The following variables were not found in the environment:\n")
+#   print(missing_vars)
+# } else {
+#   # Save non-plot variables to RData file
+#   save(list = non_plot_vars, file = "selected_variables.RData")
+#   cat("Non-plot variables have been saved to 'selected_variables.RData'.\n")
+# 
+#   # Save plots as image files
+#   for (plot_name in plot_vars) {
+#     plot_obj <- get(plot_name)  # Get the plot object
+#     plot_file_name <- paste0(plot_name, ".png")  # Generate a file name for the plot
+# 
+#     # Save the plot
+#     ggsave(plot_file_name, plot = plot_obj)
+#     cat("Plot successfully saved:", plot_file_name, "\n")
+#   }
+# }
