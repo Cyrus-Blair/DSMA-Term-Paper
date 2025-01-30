@@ -1,0 +1,94 @@
+rm(list= ls())
+
+
+### Daten einlesen
+
+
+## Wetter Daten einlesen/ zusammenführen
+
+# Pfade zu den Verzeichnissen und Dateien
+pfad_wetterdaten <- "C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics/Weather Data - Carnegie Mellon University/Weather Station Data"
+pfad_cityinfo <- "C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics/Weather Data - Carnegie Mellon University/city_info.csv"
+
+# Wetterdaten einlesen und zusammenführen
+dateiliste <- list.files(path = pfad_wetterdaten, pattern = "*.csv", full.names = TRUE)
+Wetter_Daten <- do.call(rbind, lapply(dateiliste, function(x) {
+  daten <- read.csv(x, stringsAsFactors = FALSE)
+  daten$ID <- sub("\\.csv$", "", basename(x))  # ID-Spalte mit dem Dateinamen ohne ".csv"
+  return(daten)
+}))
+
+# city_info einlesen
+city_info <- read.csv(pfad_cityinfo, stringsAsFactors = FALSE)
+
+# Wetterdaten mit den Städtenamen aus city_info verbinden
+# Dies ersetzt die ID in 'Wetter_Daten' durch den Städtenamen aus 'city_info'
+Wetter_Daten <- merge(Wetter_Daten, city_info[, c("ID", "Name")], by.x = "ID", by.y = "ID", all.x = TRUE)
+
+# Die ID-Spalte durch den Namen ersetzen und für Übersichtlichkeit optional umbenennen
+Wetter_Daten$City <- Wetter_Daten$Name
+Wetter_Daten$Name <- NULL  # Löscht die temporäre "Name"-Spalte
+Wetter_Daten$X <- NULL    # Löscht die Spalte X
+Wetter_Daten$ID <- NULL    # Löscht die ID-Spalte, falls nur der Name benötigt wird
+
+# Deduplizieren des Wetterdatensatzes, sodass nur eine Zeile pro City-Date-Kombination bleibt
+Wetter_Daten_unique <- Wetter_Daten[!duplicated(Wetter_Daten[, c("City", "Date")]), ]
+
+
+
+## YELP Daten einlesen
+
+# Pfad zu den YELP Daten
+pfad_YELP_Daten1 <- "C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics/Querry Results - YELP Data/SQL Querry YELP Data (Review - unstructured) - 01.12.2017 bis 01.12.2018.csv"
+pfad_YELP_Daten2 <- "C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics/Querry Results - YELP Data/SQL Querry YELP Data (Review - unstructured) - 01.12.2018 bis 01.12.2019.csv"
+
+
+# YELP Datensätze einlesen und in YELP_Daten speichern
+YELP_Daten1 <- read.csv(pfad_YELP_Daten1, stringsAsFactors = FALSE)
+YELP_Daten2 <- read.csv(pfad_YELP_Daten2, stringsAsFactors = FALSE)
+
+# Beide Datensätze zu einem zusammenfügen
+YELP_Daten <- rbind(YELP_Daten1, YELP_Daten2)
+
+
+
+
+                       
+                       
+
+## YELP Daten mit Wetterdaten mergen
+
+# Sicherstellen, dass Datumsformate in beiden Datensätzen übereinstimmen
+YELP_Daten$review_date <- as.Date(YELP_Daten$review_date, format = "%Y-%m-%d")
+Wetter_Daten$Date <- as.Date(Wetter_Daten$Date, format = "%Y-%m-%d")  # Hier "Date" ggf. anpassen, falls anders benannt
+
+# Zusammenführen der Datensätze basierend auf "business_city" und "review_date"
+merged_data <- merge(
+  YELP_Daten,                # Hauptdatensatz 
+  Wetter_Daten_unique,       # Wetterdatensatz
+  by.x = c("business_city", "review_date"),  # Verknüpfungskriterien in YELP_Daten
+  by.y = c("City", "Date"),                  # Verknüpfungskriterien in Wetterdaten
+  all.x = TRUE                              # Left Join: Alle Zeilen aus YELP_Daten beibehalten
+)
+
+# Ergebnis anzeigen
+head(merged_data)
+str(merged_data)
+nrow(merged_data)
+nrow(YELP_Daten)
+summary(merged_data)
+
+
+
+
+
+### Datensatz speichern
+
+
+# Speicherpfad für die CSV-Datei
+output_pfad <- "C:/Users/Cyrus Blair/Documents/Uni/Master/Semester 3/Data Science and Marketing Analytics/merged_data_Review.csv"
+
+# Gemergten Datensatz als CSV speichern
+write.csv(merged_data, file = output_pfad, row.names = FALSE)
+
+
